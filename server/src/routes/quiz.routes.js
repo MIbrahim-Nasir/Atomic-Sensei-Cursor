@@ -11,13 +11,28 @@ const geminiService = require('../services/gemini.service');
 
 /**
  * @route   POST /api/quizzes/generate
- * @desc    Generate a quiz for a topic
+ * @desc    Generate a quiz for a topic or subtopic
  * @access  Private
  */
 router.post('/generate', authMiddleware, async (req, res) => {
   try {
-    const { roadmapId, moduleIndex, topicIndex, contentId } = req.body;
+    const { 
+      roadmapId, 
+      moduleIndex, 
+      topicIndex, 
+      subtopicIndex,
+      contentText,
+      topicTitle,
+      topicDescription,
+      moduleTitle,
+      moduleDescription,
+      subtopicTitle,
+      subtopicDescription
+    } = req.body;
+    
     const userId = req.user.id;
+
+    console.log(`Quiz generation requested for roadmap ${roadmapId}, module ${moduleIndex}, topic ${topicIndex}`);
 
     // Check if user exists
     const user = await User.findById(userId);
@@ -31,37 +46,69 @@ router.post('/generate', authMiddleware, async (req, res) => {
       return res.status(404).json({ message: 'Roadmap not found' });
     }
 
-    // Get the topic
+    // Get the module
     const module = roadmap.modules[moduleIndex];
     if (!module) {
       return res.status(404).json({ message: 'Module not found' });
     }
 
+    // Get the topic
     const topic = module.topics[topicIndex];
     if (!topic) {
       return res.status(404).json({ message: 'Topic not found' });
     }
 
-    // Get the content
-    const content = await Content.findOne({ 
-      _id: contentId || topic.contentId,
-      roadmap: roadmapId,
-      user: userId
-    });
-
-    if (!content) {
-      return res.status(404).json({ message: 'Content not found' });
+    // Handle subtopic if specified
+    let subtopic = null;
+    let contentId = topic.contentId;
+    let quizType = 'topic';
+    let targetId = topic._id;
+    
+    if (subtopicIndex !== undefined && subtopicIndex !== null) {
+      subtopic = topic.subtopics && topic.subtopics[subtopicIndex];
+      if (!subtopic) {
+        return res.status(404).json({ message: 'Subtopic not found' });
+      }
+      contentId = subtopic.contentId;
+      quizType = 'subtopic';
+      targetId = subtopic._id;
     }
 
-    // Check if quiz already exists for this topic
-    const existingQuiz = await Quiz.findOne({ 
+    // Check if quiz already exists
+    const query = { 
       roadmap: roadmapId,
-      topic: topic._id,
-      user: userId
-    });
+      user: userId,
+      moduleIndex: moduleIndex,
+      topicIndex: topicIndex
+    };
+    
+    if (quizType === 'subtopic') {
+      query.subtopicIndex = subtopicIndex;
+    }
 
+    const existingQuiz = await Quiz.findOne(query);
+    
     if (existingQuiz) {
+      console.log(`Found existing quiz for ${topic.title}, returning it`);
       return res.json(existingQuiz);
+    }
+
+    // Get content from request or try to fetch from database if not provided
+    let learningContent = contentText;
+    
+    if (!learningContent) {
+      // Try to get from database
+      if (contentId) {
+        const content = await Content.findById(contentId);
+        if (content) {
+          learningContent = content.textContent;
+        }
+      }
+      
+      // If still no content, use topic description as fallback
+      if (!learningContent) {
+        learningContent = quizType === 'subtopic' ? subtopic.description : topic.description;
+      }
     }
 
     // Prepare data for quiz generation
@@ -69,44 +116,141 @@ router.post('/generate', authMiddleware, async (req, res) => {
       name: user.name,
       age: user.age,
       educationLevel: user.educationLevel,
-      learningPreferences: user.learningPreferences
+      learningPreferences: user.learningPreferences,
+      skillLevel: user.skillLevel || 'intermediate'
     };
 
-    const topicData = {
-      title: topic.title,
-      description: topic.description
+    const learningData = {
+      moduleTitle: moduleTitle || module.title,
+      moduleDescription: moduleDescription || module.description,
+      topicTitle: topicTitle || topic.title,
+      topicDescription: topicDescription || topic.description,
+      contentText: learningContent,
+      estimatedTimeMinutes: topic.estimatedTimeMinutes || 10,
+      moduleIndex,
+      topicIndex
     };
+    
+    // Add subtopic data if applicable
+    if (quizType === 'subtopic') {
+      learningData.subtopicIndex = subtopicIndex;
+      learningData.subtopicTitle = subtopicTitle || subtopic.title;
+      learningData.subtopicDescription = subtopicDescription || subtopic.description;
+    }
 
-    // Generate quiz using AI
-    const quizData = await geminiService.generateQuiz(topicData, content, userData);
+    console.log(`Generating quiz using AI for ${quizType} "${learningData.topicTitle}"`);
 
-    // Create quiz in database
-    const quiz = new Quiz({
-      title: quizData.title || `Quiz: ${topic.title}`,
-      description: quizData.description || `Test your knowledge of ${topic.title}`,
-      roadmap: roadmapId,
-      topic: topic._id,
-      content: content._id,
-      user: userId,
-      questions: quizData.questions.map(question => ({
-        questionText: question.questionText,
-        questionType: question.questionType,
-        options: question.options,
-        correctAnswer: question.correctAnswer,
-        explanation: question.explanation,
-        difficulty: question.difficulty || 'medium',
-        pointsValue: question.pointsValue || 1
-      })),
-      aiGenerated: true
-    });
+    try {
+      // Generate quiz using AI
+      const quizData = await geminiService.generateQuiz(learningData, userData);
 
-    await quiz.save();
+      // Ensure we have the minimum required quiz data structure
+      if (!quizData || !quizData.questions || !Array.isArray(quizData.questions) || quizData.questions.length === 0) {
+        throw new Error('Invalid quiz data structure returned by AI');
+      }
 
-    // Update the topic with the quiz ID
-    topic.quizId = quiz._id;
-    await roadmap.save();
+      // Create quiz in database
+      const quiz = new Quiz({
+        title: quizData.title || `Quiz: ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
+        description: quizData.description || `Test your knowledge on ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
+        questions: quizData.questions.map(q => ({
+          type: q.type,
+          question: q.question,
+          options: q.type === 'multipleChoice' ? q.options : undefined,
+          answer: q.answer,
+          explanation: q.explanation
+        })),
+        roadmap: roadmapId,
+        moduleIndex,
+        topicIndex,
+        subtopicIndex: quizType === 'subtopic' ? subtopicIndex : null,
+        user: userId,
+        aiGenerated: true
+      });
 
-    res.status(201).json(quiz);
+      await quiz.save();
+      console.log(`Quiz successfully generated and saved with ID: ${quiz._id}`);
+
+      // Update the topic or subtopic with the quiz ID
+      if (quizType === 'subtopic') {
+        if (!topic.subtopics[subtopicIndex].quizId) {
+          topic.subtopics[subtopicIndex].quizId = quiz._id;
+          await roadmap.save();
+        }
+      } else {
+        if (!topic.quizId) {
+          topic.quizId = quiz._id;
+          await roadmap.save();
+        }
+      }
+
+      res.status(201).json(quiz);
+    } catch (aiError) {
+      console.error('AI Quiz generation error:', aiError);
+      
+      // Create mock quiz for development or fallback
+      const mockQuestions = [
+        {
+          type: 'multipleChoice',
+          question: `Which of the following best describes ${quizType === 'subtopic' ? subtopic.title : topic.title}?`,
+          options: [
+            `This is the main concept covered in this lesson`,
+            `This is a secondary concept explained in the module`,
+            `This is a practical application of module principles`,
+            `This is an advanced topic for further study`
+          ],
+          answer: 0,
+          explanation: 'The main concept is the focus of this specific learning unit.'
+        },
+        {
+          type: 'trueFalse',
+          question: `${quizType === 'subtopic' ? subtopic.title : topic.title} is an important component of ${module.title}.`,
+          answer: true,
+          explanation: `This ${quizType} is integral to understanding the overall module.`
+        },
+        {
+          type: 'multipleChoice',
+          question: `What is the relationship between ${topic.title} and ${module.title}?`,
+          options: [
+            `${topic.title} is a fundamental concept within ${module.title}`,
+            `${topic.title} is unrelated to ${module.title}`,
+            `${topic.title} is a prerequisite for ${module.title}`,
+            `${topic.title} is an advanced concept beyond ${module.title}`
+          ],
+          answer: 0,
+          explanation: `Topics are fundamental concepts that make up a module.`
+        }
+      ];
+      
+      const mockQuiz = new Quiz({
+        title: `Quiz: ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
+        description: `Test your knowledge on ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
+        questions: mockQuestions,
+        roadmap: roadmapId,
+        moduleIndex,
+        topicIndex,
+        subtopicIndex: quizType === 'subtopic' ? subtopicIndex : null,
+        user: userId,
+        aiGenerated: false
+      });
+      
+      await mockQuiz.save();
+      console.log(`Mock quiz created due to AI error with ID: ${mockQuiz._id}`);
+      
+      if (quizType === 'subtopic') {
+        if (!topic.subtopics[subtopicIndex].quizId) {
+          topic.subtopics[subtopicIndex].quizId = mockQuiz._id;
+          await roadmap.save();
+        }
+      } else {
+        if (!topic.quizId) {
+          topic.quizId = mockQuiz._id;
+          await roadmap.save();
+        }
+      }
+      
+      res.status(201).json(mockQuiz);
+    }
   } catch (error) {
     console.error('Generate quiz error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });

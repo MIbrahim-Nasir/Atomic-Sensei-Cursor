@@ -16,6 +16,8 @@ router.post('/generate', authMiddleware, async (req, res) => {
     const { roadmapId, moduleIndex, topicIndex, subtopicIndex } = req.body;
     const userId = req.user.id;
 
+    console.log(`Content generation requested for roadmap ${roadmapId}, module ${moduleIndex}, topic ${topicIndex}`);
+
     // Check if user exists
     const user = await User.findById(userId);
     if (!user) {
@@ -69,6 +71,7 @@ router.post('/generate', authMiddleware, async (req, res) => {
     const existingContent = await Content.findOne(query);
 
     if (existingContent) {
+      console.log(`Found existing content for topic ${topic.title}, returning it`);
       return res.json(existingContent);
     }
 
@@ -77,10 +80,13 @@ router.post('/generate', authMiddleware, async (req, res) => {
       name: user.name,
       age: user.age,
       educationLevel: user.educationLevel,
-      learningPreferences: user.learningPreferences
+      learningPreferences: user.learningPreferences,
+      skillLevel: user.skillLevel || 'intermediate'
     };
 
-    const learningData = {
+    const contentRequest = {
+      roadmapId,
+      roadmapGoal: roadmap.goal,
       moduleTitle: module.title,
       moduleDescription: module.description,
       topicTitle: topic.title,
@@ -92,47 +98,88 @@ router.post('/generate', authMiddleware, async (req, res) => {
     
     // Add subtopic data if applicable
     if (contentType === 'subtopic') {
-      learningData.subtopicIndex = subtopicIndex;
-      learningData.subtopicTitle = subtopic.title;
-      learningData.subtopicDescription = subtopic.description;
+      contentRequest.subtopicIndex = subtopicIndex;
+      contentRequest.subtopicTitle = subtopic.title;
+      contentRequest.subtopicDescription = subtopic.description;
     }
 
-    // Generate content using AI
-    const contentData = await geminiService.generateContent(learningData, userData);
+    console.log(`Generating content using AI for ${contentType} "${contentRequest.topicTitle}"`);
 
-    // Create content in database
-    const content = new Content({
-      title: contentData.title,
-      description: contentData.description,
-      type: contentData.type || 'text',
-      textContent: contentData.textContent,
-      tags: contentData.tags || [],
-      estimatedTimeMinutes: contentData.estimatedTimeMinutes,
-      difficulty: contentData.difficulty || 'beginner',
-      roadmap: roadmapId,
-      moduleIndex,
-      topicIndex,
-      subtopicIndex: contentType === 'subtopic' ? subtopicIndex : null,
-      user: userId,
-      aiGenerated: true
-    });
+    try {
+      // Generate content using AI
+      const contentData = await geminiService.generateContent(contentRequest, userData);
 
-    await content.save();
+      // Create content in database
+      const content = new Content({
+        title: contentData.title,
+        textContent: contentData.contentText,
+        description: contentType === 'subtopic' ? subtopic.description : topic.description,
+        type: 'text',
+        tags: [topic.title.toLowerCase()],
+        estimatedTimeMinutes: contentData.readingTimeMinutes,
+        difficulty: userData.skillLevel || 'beginner',
+        roadmap: roadmapId,
+        moduleIndex,
+        topicIndex,
+        subtopicIndex: contentType === 'subtopic' ? subtopicIndex : null,
+        user: userId,
+        aiGenerated: true
+      });
 
-    // Update the topic or subtopic with the content ID
-    if (contentType === 'subtopic') {
-      if (!topic.subtopics[subtopicIndex].contentId) {
-        topic.subtopics[subtopicIndex].contentId = content._id;
-        await roadmap.save();
+      await content.save();
+      console.log(`Content successfully generated and saved with ID: ${content._id}`);
+
+      // Update the topic or subtopic with the content ID
+      if (contentType === 'subtopic') {
+        if (!topic.subtopics[subtopicIndex].contentId) {
+          topic.subtopics[subtopicIndex].contentId = content._id;
+          await roadmap.save();
+        }
+      } else {
+        if (!topic.contentId) {
+          topic.contentId = content._id;
+          await roadmap.save();
+        }
       }
-    } else {
-      if (!topic.contentId) {
-        topic.contentId = content._id;
-        await roadmap.save();
+
+      res.status(201).json(content);
+    } catch (aiError) {
+      console.error('AI Content generation error:', aiError);
+      
+      // Create mock content for development
+      const mockContent = new Content({
+        title: contentType === 'subtopic' ? `${topic.title}: ${subtopic.title}` : topic.title,
+        description: contentType === 'subtopic' ? subtopic.description : topic.description,
+        type: 'text',
+        textContent: `# ${contentType === 'subtopic' ? subtopic.title : topic.title}\n\n${contentType === 'subtopic' ? subtopic.description : topic.description}\n\n## This is mock content\n\nThis is placeholder content created because the AI content generation service encountered an error:\n\n${aiError.message}\n\nPlease check your Gemini API key and configuration.`,
+        tags: [topic.title.toLowerCase()],
+        estimatedTimeMinutes: topic.estimatedTimeMinutes || 10,
+        difficulty: 'beginner',
+        roadmap: roadmapId,
+        moduleIndex,
+        topicIndex,
+        subtopicIndex: contentType === 'subtopic' ? subtopicIndex : null,
+        user: userId,
+        aiGenerated: false
+      });
+      
+      await mockContent.save();
+      console.log(`Mock content created due to AI error with ID: ${mockContent._id}`);
+      
+      if (contentType === 'subtopic') {
+        if (!topic.subtopics[subtopicIndex].contentId) {
+          topic.subtopics[subtopicIndex].contentId = mockContent._id;
+          await roadmap.save();
+        }
+      } else {
+        if (!topic.contentId) {
+          topic.contentId = mockContent._id;
+          await roadmap.save();
+        }
       }
+      
+      res.status(201).json(mockContent);
     }
-
-    res.status(201).json(content);
   } catch (error) {
     console.error('Generate content error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });

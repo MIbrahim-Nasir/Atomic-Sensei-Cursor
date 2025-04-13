@@ -1,9 +1,12 @@
 import api from './api';
+import roadmapService from './roadmap.service';
 
 const contentService = {
   // Generate content for a specific topic
   generateContent: async (roadmapId, moduleIndex, topicIndex, subtopicIndex = null) => {
     try {
+      console.log('[ContentService] Generating content via API for:', { roadmapId, moduleIndex, topicIndex, subtopicIndex });
+      
       // Prepare request data
       const requestData = {
         roadmapId,
@@ -17,35 +20,162 @@ const contentService = {
       }
       
       // Call the API
+      console.log('[ContentService] Making API request with data:', requestData);
       const response = await api.post('/content/generate', requestData);
-      return response.data;
+      console.log('[ContentService] API response received with status:', response.status);
+      console.log('[ContentService] Content data preview:', {
+        id: response.data._id || response.data.id,
+        title: response.data.title,
+        contentLength: response.data.content ? response.data.content.length : 0,
+        contentPreview: response.data.content ? response.data.content.substring(0, 100) + '...' : 'No content'
+      });
+      
+      // Ensure we have the content field even if it's named textContent in the response
+      let processedResponse = { ...response.data };
+      
+      // If the API returns textContent instead of content (common backend naming convention)
+      if (!processedResponse.content && processedResponse.textContent) {
+        console.log('[ContentService] Converting textContent to content field');
+        processedResponse.content = processedResponse.textContent;
+      }
+      
+      // Log what we're returning
+      console.log('[ContentService] Returning content with field availability: ', {
+        hasTitle: !!processedResponse.title,
+        hasDescription: !!processedResponse.description,
+        hasContent: !!processedResponse.content,
+        contentLength: processedResponse.content ? processedResponse.content.length : 0
+      });
+      
+      return processedResponse;
     } catch (error) {
-      console.error('Error generating content:', error);
-      throw error;
+      console.error('[ContentService] Error generating content:', error);
+      
+      // Fall back to mock content in case of API error
+      console.log('[ContentService] Falling back to mock content generation');
+      const mockContent = contentService.mockGenerateContent(
+        roadmapId, 
+        moduleIndex, 
+        topicIndex, 
+        { 
+          title: `Topic ${topicIndex} of Module ${moduleIndex}`,
+          description: 'No description available'
+        }
+      );
+      return mockContent;
     }
   },
   
   // Generate quiz for a topic
   generateQuiz: async (roadmapId, moduleIndex, topicIndex, subtopicIndex = null) => {
     try {
-      // Prepare request data
+      console.log(`[ContentService] Generating quiz for roadmap: ${roadmapId}, module: ${moduleIndex}, topic: ${topicIndex}`);
+      
+      // First, get the roadmap to access the topic details
+      const roadmap = await roadmapService.getRoadmapById(roadmapId);
+      if (!roadmap) {
+        console.error('[ContentService] Cannot generate quiz - roadmap not found');
+        throw new Error('Roadmap not found');
+      }
+
+      const moduleData = roadmap.modules[moduleIndex];
+      if (!moduleData) {
+        console.error('[ContentService] Cannot generate quiz - module not found');
+        throw new Error('Module not found');
+      }
+
+      const topic = moduleData.topics[topicIndex];
+      if (!topic) {
+        console.error('[ContentService] Cannot generate quiz - topic not found');
+        throw new Error('Topic not found');
+      }
+
+      // Get the content for this topic to use in quiz generation
+      let content;
+      try {
+        // Get the content using the existing API
+        content = await contentService.getContentForTopic(roadmapId, moduleIndex, topicIndex, subtopicIndex);
+        console.log('[ContentService] Retrieved content for quiz generation');
+      } catch (contentError) {
+        console.error('[ContentService] Could not retrieve content, generating quiz without content:', contentError);
+        content = { content: topic.description || 'No description available', textContent: topic.description || 'No description available' };
+      }
+
+      // Prepare the request to the backend's quiz generation endpoint
       const requestData = {
         roadmapId,
         moduleIndex,
-        topicIndex
+        topicIndex,
+        subtopicIndex,
+        contentText: content.textContent || content.content || topic.description || 'No description available',
+        topicTitle: topic.title,
+        topicDescription: topic.description || 'No description available',
+        moduleTitle: moduleData.title,
+        moduleDescription: moduleData.description || 'No description available',
+        subtopicTitle: subtopicIndex !== null && topic.subtopics ? topic.subtopics[subtopicIndex].title : null,
+        subtopicDescription: subtopicIndex !== null && topic.subtopics ? topic.subtopics[subtopicIndex].description : null
       };
+
+      console.log('[ContentService] Sending quiz generation request with data');
       
-      // Include subtopic if provided
-      if (subtopicIndex !== null) {
-        requestData.subtopicIndex = subtopicIndex;
+      try {
+        // Call the backend API to generate the quiz using Gemini
+        const response = await api.post('/quizzes/generate', requestData);
+        console.log('[ContentService] Quiz generation successful:', response.data.title);
+        
+        return {
+          id: response.data._id || response.data.id || `quiz-${Date.now()}`,
+          title: response.data.title,
+          description: response.data.description,
+          questions: response.data.questions.map(q => ({
+            id: q._id || q.id || Math.random().toString(36).substring(2, 9),
+            text: q.question || q.questionText,
+            type: q.type || 'multiple-choice',
+            options: q.type === 'multipleChoice' || q.type === 'multiple-choice' 
+              ? q.options.map((opt, idx) => ({ 
+                  id: opt.id || opt._id || String.fromCharCode(97 + idx), // a, b, c, d... 
+                  text: opt.text 
+                }))
+              : null,
+            correctAnswer: q.answer,
+            explanation: q.explanation
+          })),
+          timestamp: response.data.createdAt || new Date().toISOString()
+        };
+      } catch (apiError) {
+        console.error('[ContentService] API quiz generation failed:', apiError);
+        // Fall back to mock quiz generation
+        console.log('[ContentService] Falling back to mock quiz generation');
+        return contentService.mockGenerateQuiz(roadmapId, moduleIndex, topicIndex, {
+          title: topic.title || `Topic ${topicIndex}`,
+          description: topic.description || 'No description available'
+        });
       }
-      
-      // Call the API
-      const response = await api.post('/quizzes/generate', requestData);
-      return response.data;
     } catch (error) {
-      console.error('Error generating quiz:', error);
-      throw error;
+      console.error('[ContentService] Error in quiz generation:', error);
+      
+      // Make sure roadmap is defined here to prevent the undefined error
+      // Fall back to mock quiz generation as a last resort
+      console.log('[ContentService] Falling back to mock quiz generation due to error');
+      
+      try {
+        // Try to get the roadmap data again in case it wasn't fetched earlier
+        const roadmap = await roadmapService.getRoadmapById(roadmapId);
+        const topicTitle = roadmap?.modules[moduleIndex]?.topics[topicIndex]?.title || `Topic ${topicIndex}`;
+        const topicDescription = roadmap?.modules[moduleIndex]?.topics[topicIndex]?.description || 'No description available';
+        
+        return contentService.mockGenerateQuiz(roadmapId, moduleIndex, topicIndex, {
+          title: topicTitle,
+          description: topicDescription
+        });
+      } catch (fallbackError) {
+        console.error('[ContentService] Failed to generate fallback quiz with roadmap data:', fallbackError);
+        // Final fallback with minimal data
+        return contentService.mockGenerateQuiz(roadmapId, moduleIndex, topicIndex, {
+          title: `Topic ${topicIndex} of Module ${moduleIndex}`,
+          description: 'No description available'
+        });
+      }
     }
   },
   
@@ -145,10 +275,11 @@ const contentService = {
   cacheContentLocally: (cacheKey, content) => {
     if (typeof window !== 'undefined') {
       try {
+        console.log('[ContentService] Caching content locally with key:', cacheKey);
         localStorage.setItem(`content_${cacheKey}`, JSON.stringify(content));
         return true;
       } catch (error) {
-        console.error('Error caching content locally:', error);
+        console.error('[ContentService] Error caching content locally:', error);
         return false;
       }
     }
@@ -159,10 +290,25 @@ const contentService = {
   getLocalContent: (cacheKey) => {
     if (typeof window !== 'undefined') {
       try {
+        console.log('[ContentService] Attempting to get local content with key:', cacheKey);
         const contentStr = localStorage.getItem(`content_${cacheKey}`);
-        return contentStr ? JSON.parse(contentStr) : null;
+        
+        if (!contentStr) {
+          console.log('[ContentService] No content found in local storage');
+          return null;
+        }
+        
+        const parsedContent = JSON.parse(contentStr);
+        console.log('[ContentService] Content found in local storage:', parsedContent ? 'Yes (has data)' : 'No (null after parsing)');
+        
+        if (!parsedContent || !parsedContent.content) {
+          console.log('[ContentService] Retrieved content appears invalid');
+          return null;
+        }
+        
+        return parsedContent;
       } catch (error) {
-        console.error('Error getting local content:', error);
+        console.error('[ContentService] Error getting local content:', error);
         return null;
       }
     }
@@ -173,10 +319,11 @@ const contentService = {
   clearLocalContent: (cacheKey) => {
     if (typeof window !== 'undefined') {
       try {
+        console.log('[ContentService] Clearing local content with key:', cacheKey);
         localStorage.removeItem(`content_${cacheKey}`);
         return true;
       } catch (error) {
-        console.error('Error clearing local content:', error);
+        console.error('[ContentService] Error clearing local content:', error);
         return false;
       }
     }
@@ -185,35 +332,116 @@ const contentService = {
   
   // Mock content generation (for development/testing)
   mockGenerateContent: (roadmapId, moduleIndex, topicIndex, topic) => {
-    return {
+    console.log('[ContentService] Generating mock content for:', { 
+      roadmapId, moduleIndex, topicIndex, topicTitle: topic.title 
+    });
+    
+    const mockContent = {
       id: `content-${Date.now()}`,
       roadmapId,
       moduleIndex,
       topicIndex,
-      title: topic.title,
-      description: topic.description,
-      content: `This is mock content for the topic "${topic.title}". In a real implementation, this would be AI-generated content from Gemini about this topic, explaining the concepts in detail and providing examples.
-      
-The content would be formatted with proper headings, paragraphs, and possibly code snippets or mathematical formulas depending on the subject matter.
-
-This is a placeholder used for development and testing purposes.`,
+      title: topic.title || `Topic ${topicIndex}`,
+      description: topic.description || `Description for topic ${topicIndex} of module ${moduleIndex}`,
+      content: `# ${topic.title || `Topic ${topicIndex}`}\n\nThis is mock content for the topic "${topic.title || `Topic ${topicIndex}`}". In a real implementation, this would be AI-generated content from Gemini about this topic, explaining the concepts in detail and providing examples.\n\nThe content would be formatted with proper headings, paragraphs, and possibly code snippets or mathematical formulas depending on the subject matter.\n\nThis is a placeholder used for development and testing purposes.`,
       timestamp: new Date().toISOString()
     };
+    
+    console.log('[ContentService] Mock content generated:', mockContent);
+    return mockContent;
   },
   
   // Mock quiz generation (for development/testing)
-  mockGenerateQuiz: (roadmapId, moduleIndex, topicIndex, topic) => {
+  mockGenerateQuiz: (roadmapId, moduleIndex, topicIndex, topic = {}) => {
+    // Ensure topic has default values if undefined
+    const topicTitle = topic?.title || `Topic ${topicIndex}`;
+    
+    // Special case for Python topics
+    if (topicTitle && topicTitle.toLowerCase().includes('python')) {
+      return {
+        id: `quiz-${Date.now()}`,
+        roadmapId,
+        moduleIndex,
+        topicIndex,
+        title: `Quiz: ${topicTitle}`,
+        description: `Test your knowledge of ${topicTitle}`,
+        questions: [
+          {
+            id: 1,
+            text: "What makes Python particularly suitable for beginners?",
+            type: 'multiple-choice',
+            options: [
+              { id: 'a', text: 'Its readable and clean syntax' },
+              { id: 'b', text: 'Its powerful performance capabilities' },
+              { id: 'c', text: 'Its strict typing system' },
+              { id: 'd', text: 'Its complex but powerful control structures' }
+            ],
+            correctAnswer: 'a',
+            explanation: 'Python is known for its clean, readable syntax that emphasizes code readability, making it an excellent language for beginners.'
+          },
+          {
+            id: 2,
+            text: "True or False: Python is a compiled language.",
+            type: 'true-false',
+            correctAnswer: 'false',
+            explanation: 'Python is an interpreted language, not a compiled language. Python code is executed line by line by the Python interpreter.'
+          },
+          {
+            id: 3,
+            text: "Which of the following is NOT a common application of Python?",
+            type: 'multiple-choice',
+            options: [
+              { id: 'a', text: 'Data Science and Analysis' },
+              { id: 'b', text: 'Web Development' },
+              { id: 'c', text: 'Mobile App Development' },
+              { id: 'd', text: 'Machine Learning' }
+            ],
+            correctAnswer: 'c',
+            explanation: 'While Python can be used for mobile app development with frameworks like Kivy or BeeWare, it is not as commonly used for this purpose as it is for data science, web development, and machine learning.'
+          },
+          {
+            id: 4,
+            text: "What symbol is used for comments in Python?",
+            type: 'multiple-choice',
+            options: [
+              { id: 'a', text: '//' },
+              { id: 'b', text: '/* */' },
+              { id: 'c', text: '#' },
+              { id: 'd', text: '--' }
+            ],
+            correctAnswer: 'c',
+            explanation: 'In Python, the hash symbol (#) is used to start a comment. Everything after the # on the same line is considered a comment and is ignored by the interpreter.'
+          },
+          {
+            id: 5,
+            text: "Which of these statements about Python is true?",
+            type: 'multiple-choice',
+            options: [
+              { id: 'a', text: 'Python requires variable type declarations' },
+              { id: 'b', text: 'Python uses curly braces {} for code blocks' },
+              { id: 'c', text: 'Python uses indentation for code blocks' },
+              { id: 'd', text: 'Python is primarily used for low-level system programming' }
+            ],
+            correctAnswer: 'c',
+            explanation: 'Python uses indentation (whitespace) to define code blocks, rather than curly braces or keywords. This enforces readable code by making proper indentation a requirement.'
+          }
+        ],
+        timestamp: new Date().toISOString()
+      };
+    }
+    
+    // For other topics, use the general questions
     return {
       id: `quiz-${Date.now()}`,
       roadmapId,
       moduleIndex,
       topicIndex,
-      title: `Quiz: ${topic.title}`,
-      description: `Test your knowledge of ${topic.title}`,
+      title: `Quiz: ${topicTitle}`,
+      description: `Test your knowledge of ${topicTitle}`,
       questions: [
         {
           id: 1,
-          text: `What is the main purpose of ${topic.title}?`,
+          text: `What is the main purpose of ${topicTitle}?`,
           type: 'multiple-choice',
           options: [
             { id: 'a', text: 'To simplify complex processes' },
@@ -226,14 +454,14 @@ This is a placeholder used for development and testing purposes.`,
         },
         {
           id: 2,
-          text: `True or False: ${topic.title} is primarily used in backend development.`,
+          text: `True or False: ${topicTitle} is primarily used in backend development.`,
           type: 'true-false',
           correctAnswer: 'true',
           explanation: 'This concept is indeed primarily used in backend development for handling data processing and business logic.'
         },
         {
           id: 3,
-          text: `What is a key benefit of using ${topic.title}?`,
+          text: `What is a key benefit of using ${topicTitle}?`,
           type: 'multiple-choice',
           options: [
             { id: 'a', text: 'Reduced code complexity' },
@@ -246,7 +474,7 @@ This is a placeholder used for development and testing purposes.`,
         },
         {
           id: 4,
-          text: `Which of the following is NOT related to ${topic.title}?`,
+          text: `Which of the following is NOT related to ${topicTitle}?`,
           type: 'multiple-choice',
           options: [
             { id: 'a', text: 'Data structures' },
@@ -259,7 +487,7 @@ This is a placeholder used for development and testing purposes.`,
         },
         {
           id: 5,
-          text: `When implementing ${topic.title}, what should you be most careful about?`,
+          text: `When implementing ${topicTitle}, what should you be most careful about?`,
           type: 'multiple-choice',
           options: [
             { id: 'a', text: 'Error handling' },

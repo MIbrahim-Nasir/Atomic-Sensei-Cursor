@@ -134,55 +134,51 @@ class GeminiService {
 
   /**
    * Generate educational content for a specific topic or subtopic
-   * @param {Object} learningData - Data about the learning unit (topic or subtopic)
-   * @param {Object} userData - User data and preferences
-   * @returns {Object} Content data
+   * @param {Object} contentRequest - Data about the content to generate
+   * @param {Object} userData - User data for personalization
+   * @returns {Object} Generated content data
    */
-  async generateContent(learningData, userData) {
+  async generateContent(contentRequest, userData) {
     try {
       // Determine if we're generating content for a topic or subtopic
-      const isSubtopic = learningData.subtopicIndex !== undefined && learningData.subtopicTitle;
+      const isSubtopic = contentRequest.subtopicIndex !== undefined && contentRequest.subtopicTitle;
       
-      // Get the title and description of the learning unit
-      const unitTitle = isSubtopic ? learningData.subtopicTitle : learningData.topicTitle;
-      const unitDescription = isSubtopic ? learningData.subtopicDescription : learningData.topicDescription;
+      // Get the title of the learning unit
+      const unitTitle = isSubtopic ? contentRequest.subtopicTitle : contentRequest.topicTitle;
       
-      // Enhance context by including module/topic information for subtopics
-      const contextInfo = isSubtopic
-        ? `This is part of the topic "${learningData.topicTitle}" within the module "${learningData.moduleTitle}".`
-        : `This is part of the module "${learningData.moduleTitle}".`;
+      // Start with the user's skill level from userData, default to intermediate if not provided
+      const skillLevel = userData?.skillLevel || 'intermediate';
+      
+      // Base learning goal from the roadmap
+      const learningGoal = contentRequest.roadmapGoal || "Learn new skills";
       
       const prompt = `
-        You are an expert educational content creator. Create detailed learning content for the following:
+        You are an expert educational content creator. Generate comprehensive, engaging learning content on the following topic:
         
-        Title: ${unitTitle}
-        Description: ${unitDescription}
-        Context: ${contextInfo}
+        ${isSubtopic ? 'Subtopic' : 'Topic'}: ${unitTitle}
         
-        User Age: ${userData.age || 'Unknown'}
-        Education Level: ${userData.educationLevel || 'Unknown'}
-        Learning Preferences: ${userData.learningPreferences ? JSON.stringify(userData.learningPreferences) : 'No specific preferences'}
+        This content is part of: ${contentRequest.topicTitle}${isSubtopic ? '' : ' in ' + contentRequest.moduleName}
+        Module Goal: ${contentRequest.moduleDescription || 'Build skills in this area'}
+        Overall Learning Goal: ${learningGoal}
         
-        Create engaging, clear, and educational content that explains this topic thoroughly yet concisely.
-        The content should be appropriate for a ${userData.age || 'college'}-year-old at ${userData.educationLevel || 'undergraduate'} education level.
+        The content should be:
+        1. Tailored for a ${skillLevel} skill level
+        2. Concise but comprehensive with a word count of 800-1200 words
+        3. Include concrete examples and practical applications
+        4. Incorporate analogies to aid understanding where appropriate
+        5. Use a clear structure with headings and subheadings
+        6. Include code examples if the topic is technical or programming-related
         
-        Structure the content with:
-        1. A brief introduction to the concept
-        2. Main points and explanations
-        3. Examples or real-world applications
-        4. A concise summary
+        The content should flow in this structure:
+        - Introduction (brief overview and why this topic matters)
+        - Main concepts (core ideas broken down clearly)
+        - Examples and applications
+        - Common misconceptions or pitfalls
+        - Summary of key takeaways
         
-        Use markdown formatting for better readability:
-        - Use # for main headings
-        - Use ## for subheadings
-        - Use bullet points (- ) for lists
-        - Use **bold** for important terms
-        - Include code blocks where relevant
+        Format the content using Markdown for better readability.
         
-        The content should be detailed enough to help the student understand the concept completely
-        but be readable within ${learningData.estimatedTimeMinutes || 10} minutes.
-        
-        Return only the formatted educational content, without any introductions or explanations.
+        Return ONLY the educational content without any prefacing or additional commentary.
       `;
 
       // Generate content using the correct API format
@@ -198,20 +194,15 @@ class GeminiService {
       const response = result.response;
       const contentText = response.text();
       
-      // Format the title based on whether it's a topic or subtopic
-      const titlePrefix = isSubtopic ? `${learningData.topicTitle}: ` : '';
+      console.log(`Generated content for ${unitTitle} (truncated):`, 
+        contentText.substring(0, 200) + '... (truncated)');
       
       return {
-        title: `${titlePrefix}${unitTitle}`,
-        description: unitDescription,
-        type: 'text',
-        textContent: contentText,
-        estimatedTimeMinutes: learningData.estimatedTimeMinutes || 10,
-        tags: [unitTitle.toLowerCase()],
-        difficulty: 'beginner', // Default, can be adjusted based on topic/user
-        moduleIndex: learningData.moduleIndex,
-        topicIndex: learningData.topicIndex,
-        subtopicIndex: isSubtopic ? learningData.subtopicIndex : null
+        title: unitTitle,
+        contentText,
+        generatedAt: new Date(),
+        wordCount: contentText.split(/\s+/).length,
+        readingTimeMinutes: Math.ceil(contentText.split(/\s+/).length / 200) // Assuming 200 words per minute reading speed
       };
     } catch (error) {
       console.error('Error generating content:', error);
@@ -222,11 +213,10 @@ class GeminiService {
   /**
    * Generate quiz questions for a specific topic or subtopic based on content
    * @param {Object} learningData - Data about the learning unit (topic or subtopic)
-   * @param {Object} contentData - The content the quiz is based on
    * @param {Object} userData - User data and preferences
    * @returns {Object} Quiz data with questions
    */
-  async generateQuiz(learningData, contentData, userData) {
+  async generateQuiz(learningData, userData) {
     try {
       // Determine if we're generating a quiz for a topic or subtopic
       const isSubtopic = learningData.subtopicIndex !== undefined && learningData.subtopicTitle;
@@ -234,52 +224,61 @@ class GeminiService {
       // Get the title of the learning unit
       const unitTitle = isSubtopic ? learningData.subtopicTitle : learningData.topicTitle;
       
+      console.log(`Generating quiz for ${isSubtopic ? 'subtopic' : 'topic'}: ${unitTitle}`);
+      
+      // Create a structured prompt that includes all necessary context
       const prompt = `
-        You are an expert educational assessment creator. Create a quiz based on the following content:
+        You are an expert educational assessment creator designing a quiz for a learning platform. 
+        Create a quiz based on the following content:
         
+        --- LEARNING CONTEXT ---
         Topic: ${unitTitle}
-        Content: ${contentData.textContent.substring(0, 8000)} // Limit content length to avoid token limits
+        ${isSubtopic ? `Parent Topic: ${learningData.topicTitle}` : ''}
+        Module: ${learningData.moduleTitle}
+        Module Description: ${learningData.moduleDescription}
         
-        Create 3-5 quiz questions that test understanding of key concepts from this specific content.
-        Include a mix of multiple choice and true/false questions.
-        Each question should have an explanation for the correct answer to help the student learn.
+        --- CONTENT TO QUIZ ON ---
+        ${learningData.contentText ? learningData.contentText.substring(0, 8000) : 'Focus on the topic title and description as content is not available'}
         
-        Make sure that:
-        1. Questions focus on the most important concepts covered in the content
-        2. Multiple choice questions have 4 options with only one correct answer
-        3. True/false questions are clear and unambiguous
-        4. All questions directly relate to the material in the content
-        5. Questions range from basic recall to application of concepts
+        --- QUIZ REQUIREMENTS ---
+        1. Create exactly 5 quiz questions that test understanding of key concepts from this specific content
+        2. Questions must be accurate and based solely on the provided content
+        3. Include a mix of multiple-choice (4 options) and true/false questions 
+        4. Each question must have an explanation for the correct answer
+        5. Make questions engaging, clear, and educational
+        6. Ensure questions range from basic recall to application of concepts
         
-        Return the result as a JSON object with this structure:
+        --- RESPONSE FORMAT ---
+        Return a valid JSON object with the following structure:
         {
-          "title": "Quiz title",
-          "description": "Brief quiz description",
+          "title": "Quiz: [appropriate title based on content]",
+          "description": "Brief description of what the quiz covers",
           "questions": [
             {
-              "questionText": "Question text",
-              "questionType": "multiple-choice",
-              "options": [
-                { "id": "a", "text": "Option text", "isCorrect": true/false }
-              ],
-              "correctAnswer": "a",
-              "explanation": "Explanation of the correct answer"
+              "type": "multipleChoice",
+              "question": "Question text goes here?",
+              "options": ["Option A", "Option B", "Option C", "Option D"],
+              "answer": 0,
+              "explanation": "Explanation of why this answer is correct"
             },
             {
-              "questionText": "True/false question text",
-              "questionType": "true-false",
-              "correctAnswer": "true",
-              "explanation": "Explanation of why this is true/false"
+              "type": "trueFalse",
+              "question": "True/false statement goes here?",
+              "answer": true,
+              "explanation": "Explanation of why this is true or false"
             }
           ]
         }
         
-        For multiple-choice questions, include the ID of the correct option in the "correctAnswer" field.
-        For true-false questions, use either "true" or "false" as the correctAnswer.
-        Ensure the JSON is valid with no syntax errors.
+        IMPORTANT FORMATTING NOTES:
+        - For multiple-choice questions, specify the index of the correct option (0-based) in the "answer" field
+        - For true-false questions, use a boolean value (true or false) in the "answer" field
+        - Ensure your JSON is valid with no syntax errors
+        - Do not include any text before or after the JSON
       `;
 
       // Generate content using the correct API format
+      console.log(`Sending quiz generation prompt to Gemini for ${unitTitle}`);
       const result = await this.model.generateContent({
         contents: [
           {
@@ -292,23 +291,65 @@ class GeminiService {
       const response = result.response;
       const responseText = response.text();
       
-      // Extract the JSON from the response
-      const jsonMatch = responseText.match(/```json\n([\s\S]*?)\n```/) || 
-                        responseText.match(/```\n([\s\S]*?)\n```/) || 
-                        responseText.match(/{[\s\S]*}/);
+      // Log a truncated version of the response for debugging
+      console.log(`Raw quiz generation response for ${unitTitle} (truncated):`, 
+        responseText.substring(0, 300) + '... (truncated)');
       
-      let quizData;
-      if (jsonMatch) {
-        quizData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+      // Extract the JSON from the response
+      let jsonString;
+      const jsonMatch = responseText.match(/```json\n([\s\S]*?)\n```/) || 
+                        responseText.match(/```\n([\s\S]*?)\n```/);
+      
+      if (jsonMatch && jsonMatch[1]) {
+        jsonString = jsonMatch[1];
       } else {
-        throw new Error("Failed to parse quiz data from AI response");
+        // If not found in code blocks, look for JSON object pattern
+        const objectMatch = responseText.match(/{[\s\S]*}/);
+        if (objectMatch) {
+          jsonString = objectMatch[0];
+        } else {
+          console.error('JSON pattern not found in quiz response:', responseText);
+          throw new Error("Failed to parse quiz data from AI response: No JSON structure found");
+        }
       }
       
-      // Format the title based on whether it's a topic or subtopic
-      const titlePrefix = isSubtopic ? `${learningData.topicTitle}: ` : '';
-      quizData.title = `Quiz: ${titlePrefix}${unitTitle}`;
-      
-      return quizData;
+      try {
+        // Parse the extracted JSON
+        const quizData = JSON.parse(jsonString);
+        
+        // Validate the quiz data structure
+        if (!quizData.questions || !Array.isArray(quizData.questions)) {
+          console.error('Invalid quiz data structure:', quizData);
+          throw new Error("Invalid quiz data structure returned by AI");
+        }
+        
+        console.log(`Quiz JSON parsed successfully with ${quizData.questions.length} questions`);
+        
+        // Format the title based on whether it's a topic or subtopic
+        const titlePrefix = isSubtopic ? `${learningData.topicTitle}: ` : '';
+        quizData.title = quizData.title || `Quiz: ${titlePrefix}${unitTitle}`;
+        
+        // Ensure all questions have the required fields
+        quizData.questions = quizData.questions.map((question, index) => {
+          // Make sure each question has a default explanation if none provided
+          if (!question.explanation) {
+            question.explanation = "This answer is correct based on the learning material.";
+          }
+          
+          // Ensure options exist for multiple choice questions
+          if (question.type === "multipleChoice" && (!question.options || !Array.isArray(question.options))) {
+            question.options = ["Option A", "Option B", "Option C", "Option D"];
+            question.answer = 0; // Default to first option
+          }
+          
+          return question;
+        });
+        
+        return quizData;
+      } catch (parseError) {
+        console.error('Quiz JSON parse error:', parseError, 'JSON string:', jsonString);
+        throw new Error(`Failed to parse quiz data: ${parseError.message}`);
+      }
     } catch (error) {
       console.error('Error generating quiz:', error);
       throw error;
