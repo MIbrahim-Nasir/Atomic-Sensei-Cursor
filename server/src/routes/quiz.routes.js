@@ -32,7 +32,7 @@ router.post('/generate', authMiddleware, async (req, res) => {
     
     const userId = req.user.id;
 
-    console.log(`Quiz generation requested for roadmap ${roadmapId}, module ${moduleIndex}, topic ${topicIndex}`);
+    console.log(`Quiz generation requested for roadmap ${roadmapId}, module ${moduleIndex}, topic ${topicIndex}${subtopicIndex !== undefined ? `, subtopic ${subtopicIndex}` : ''}`);
 
     // Check if user exists
     const user = await User.findById(userId);
@@ -140,32 +140,92 @@ router.post('/generate', authMiddleware, async (req, res) => {
 
     console.log(`Generating quiz using AI for ${quizType} "${learningData.topicTitle}"`);
 
+    let quizData;
+    let isAiGenerated = true;
+    
     try {
       // Generate quiz using AI
-      const quizData = await geminiService.generateQuiz(learningData, userData);
+      quizData = await geminiService.generateQuiz(learningData, userData);
 
-      // Ensure we have the minimum required quiz data structure
+      // The geminiService now handles fallback creation, but let's add an additional check here
       if (!quizData || !quizData.questions || !Array.isArray(quizData.questions) || quizData.questions.length === 0) {
+        console.error('Invalid or empty quiz data structure returned by AI:', quizData);
         throw new Error('Invalid quiz data structure returned by AI');
       }
+      
+      // Log success
+      console.log(`AI successfully generated quiz with ${quizData.questions.length} questions`);
+      
+    } catch (aiError) {
+      console.error('AI Quiz generation error:', aiError);
+      isAiGenerated = false;
+      
+      // Create fallback quiz since AI generation failed
+      console.log('Creating fallback quiz due to AI error');
+      
+      const unitTitle = quizType === 'subtopic' ? subtopic.title : topic.title;
+      
+      quizData = {
+        title: `Quiz: ${unitTitle}`,
+        description: `Test your knowledge of ${unitTitle}`,
+        questions: [
+          {
+            type: 'multipleChoice',
+            question: `Which of the following best describes ${unitTitle}?`,
+            options: [
+              `This is the main concept covered in this lesson`,
+              `This is a secondary concept explained in the module`,
+              `This is a practical application of module principles`,
+              `This is an advanced topic for further study`
+            ],
+            answer: 0,
+            explanation: 'Understanding the primary concepts is essential for building a strong foundation.'
+          },
+          {
+            type: 'trueFalse',
+            question: `${unitTitle} is directly related to the main theme of ${module.title}.`,
+            answer: true,
+            explanation: 'This topic is an integral part of the module curriculum.'
+          },
+          {
+            type: 'multipleChoice',
+            question: `What is the recommended approach to learning about ${unitTitle}?`,
+            options: [
+              `Practice with examples after understanding theory`,
+              `Memorize key definitions without context`,
+              `Skip foundational concepts and focus on advanced applications`,
+              `Learn in isolation from other module topics`
+            ],
+            answer: 0,
+            explanation: 'Effective learning combines theoretical understanding with practical application.'
+          }
+        ]
+      };
+    }
 
+    try {
       // Create quiz in database
       const quiz = new Quiz({
         title: quizData.title || `Quiz: ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
         description: quizData.description || `Test your knowledge on ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
         questions: quizData.questions.map(q => ({
-          type: q.type,
-          question: q.question,
-          options: q.type === 'multipleChoice' ? q.options : undefined,
-          answer: q.answer,
-          explanation: q.explanation
+          type: q.type.toLowerCase().includes('multiple') ? 'multipleChoice' : 
+                q.type.toLowerCase().includes('true') ? 'trueFalse' : 'multipleChoice',
+          question: q.question || q.text || `Question about ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
+          options: q.type.toLowerCase().includes('multiple') ? 
+            (Array.isArray(q.options) ? 
+              (q.options.map(opt => typeof opt === 'string' ? opt : opt.text || `Option`)) : 
+              ['Option A', 'Option B', 'Option C', 'Option D']) : 
+            undefined,
+          answer: q.answer !== undefined ? q.answer : (q.correctAnswer !== undefined ? q.correctAnswer : 0),
+          explanation: q.explanation || 'This is the correct answer based on the learning material.'
         })),
         roadmap: roadmapId,
         moduleIndex,
         topicIndex,
         subtopicIndex: quizType === 'subtopic' ? subtopicIndex : null,
         user: userId,
-        aiGenerated: true
+        aiGenerated: isAiGenerated
       });
 
       await quiz.save();
@@ -185,75 +245,19 @@ router.post('/generate', authMiddleware, async (req, res) => {
       }
 
       res.status(201).json(quiz);
-    } catch (aiError) {
-      console.error('AI Quiz generation error:', aiError);
-      
-      // Create mock quiz for development or fallback
-      const mockQuestions = [
-        {
-          type: 'multipleChoice',
-          question: `Which of the following best describes ${quizType === 'subtopic' ? subtopic.title : topic.title}?`,
-          options: [
-            `This is the main concept covered in this lesson`,
-            `This is a secondary concept explained in the module`,
-            `This is a practical application of module principles`,
-            `This is an advanced topic for further study`
-          ],
-          answer: 0,
-          explanation: 'The main concept is the focus of this specific learning unit.'
-        },
-        {
-          type: 'trueFalse',
-          question: `${quizType === 'subtopic' ? subtopic.title : topic.title} is an important component of ${module.title}.`,
-          answer: true,
-          explanation: `This ${quizType} is integral to understanding the overall module.`
-        },
-        {
-          type: 'multipleChoice',
-          question: `What is the relationship between ${topic.title} and ${module.title}?`,
-          options: [
-            `${topic.title} is a fundamental concept within ${module.title}`,
-            `${topic.title} is unrelated to ${module.title}`,
-            `${topic.title} is a prerequisite for ${module.title}`,
-            `${topic.title} is an advanced concept beyond ${module.title}`
-          ],
-          answer: 0,
-          explanation: `Topics are fundamental concepts that make up a module.`
-        }
-      ];
-      
-      const mockQuiz = new Quiz({
-        title: `Quiz: ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
-        description: `Test your knowledge on ${quizType === 'subtopic' ? subtopic.title : topic.title}`,
-        questions: mockQuestions,
-        roadmap: roadmapId,
-        moduleIndex,
-        topicIndex,
-        subtopicIndex: quizType === 'subtopic' ? subtopicIndex : null,
-        user: userId,
-        aiGenerated: false
+    } catch (dbError) {
+      console.error('Database error saving quiz:', dbError);
+      return res.status(500).json({ 
+        message: 'Error saving quiz to database', 
+        error: dbError.message 
       });
-      
-      await mockQuiz.save();
-      console.log(`Mock quiz created due to AI error with ID: ${mockQuiz._id}`);
-      
-      if (quizType === 'subtopic') {
-        if (!topic.subtopics[subtopicIndex].quizId) {
-          topic.subtopics[subtopicIndex].quizId = mockQuiz._id;
-          await roadmap.save();
-        }
-      } else {
-        if (!topic.quizId) {
-          topic.quizId = mockQuiz._id;
-          await roadmap.save();
-        }
-      }
-      
-      res.status(201).json(mockQuiz);
     }
   } catch (error) {
-    console.error('Generate quiz error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error('Quiz generation route error:', error);
+    res.status(500).json({ 
+      message: 'Server error generating quiz', 
+      error: error.message 
+    });
   }
 });
 

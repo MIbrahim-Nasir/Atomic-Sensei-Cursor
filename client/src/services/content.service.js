@@ -69,7 +69,7 @@ const contentService = {
   // Generate quiz for a topic
   generateQuiz: async (roadmapId, moduleIndex, topicIndex, subtopicIndex = null) => {
     try {
-      console.log(`[ContentService] Generating quiz for roadmap: ${roadmapId}, module: ${moduleIndex}, topic: ${topicIndex}`);
+      console.log(`[ContentService] Generating quiz for roadmap: ${roadmapId}, module: ${moduleIndex}, topic: ${topicIndex}${subtopicIndex !== null ? `, subtopic: ${subtopicIndex}` : ''}`);
       
       // First, get the roadmap to access the topic details
       const roadmap = await roadmapService.getRoadmapById(roadmapId);
@@ -121,29 +121,42 @@ const contentService = {
       try {
         // Call the backend API to generate the quiz using Gemini
         const response = await api.post('/quizzes/generate', requestData);
+        
+        if (!response.data || !response.data.questions || !Array.isArray(response.data.questions)) {
+          console.error('[ContentService] Invalid quiz structure received from API:', response.data);
+          throw new Error('Invalid quiz structure received from the server');
+        }
+        
         console.log('[ContentService] Quiz generation successful:', response.data.title);
         
+        // Process the received quiz to ensure consistent structure
         return {
           id: response.data._id || response.data.id || `quiz-${Date.now()}`,
-          title: response.data.title,
-          description: response.data.description,
+          title: response.data.title || `Quiz: ${topic.title}`,
+          description: response.data.description || `Test your knowledge of ${topic.title}`,
           questions: response.data.questions.map(q => ({
             id: q._id || q.id || Math.random().toString(36).substring(2, 9),
-            text: q.question || q.questionText,
-            type: q.type || 'multiple-choice',
-            options: q.type === 'multipleChoice' || q.type === 'multiple-choice' 
-              ? q.options.map((opt, idx) => ({ 
-                  id: opt.id || opt._id || String.fromCharCode(97 + idx), // a, b, c, d... 
-                  text: opt.text 
-                }))
+            text: q.question || q.questionText || q.text || 'Missing question text',
+            type: (q.type || '').toLowerCase().includes('multiple') ? 'multiple-choice' : 
+                  (q.type || '').toLowerCase().includes('true') ? 'true-false' : 'multiple-choice',
+            options: (q.type || '').toLowerCase().includes('multiple') || (q.type || '').toLowerCase().includes('choice')
+              ? (Array.isArray(q.options) ? q.options.map((opt, idx) => {
+                  return typeof opt === 'object' ? opt : { id: String.fromCharCode(97 + idx), text: opt || `Option ${idx + 1}` };
+                }) 
+                : ['Option A', 'Option B', 'Option C', 'Option D'].map((text, idx) => ({
+                  id: String.fromCharCode(97 + idx),
+                  text
+                })))
               : null,
-            correctAnswer: q.answer,
-            explanation: q.explanation
+            correctAnswer: q.answer !== undefined ? q.answer : (q.correctAnswer !== undefined ? q.correctAnswer : 0),
+            explanation: q.explanation || 'Explanation not available.'
           })),
           timestamp: response.data.createdAt || new Date().toISOString()
         };
       } catch (apiError) {
         console.error('[ContentService] API quiz generation failed:', apiError);
+        console.log('[ContentService] API Error details:', apiError.response ? apiError.response.data : 'No response data');
+        
         // Fall back to mock quiz generation
         console.log('[ContentService] Falling back to mock quiz generation');
         return contentService.mockGenerateQuiz(roadmapId, moduleIndex, topicIndex, {

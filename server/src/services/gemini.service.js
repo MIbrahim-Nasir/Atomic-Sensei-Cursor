@@ -1,15 +1,20 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // Initialize Gemini AI with the API key
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// Get the model - Use the most recent model available
-const MODEL_NAME = "gemini-1.5-pro";
+const API_KEY = process.env.GEMINI_API_KEY;
 
 class GeminiService {
   constructor() {
-    this.model = genAI.getGenerativeModel({ model: MODEL_NAME });
-    console.log(`Initialized Gemini AI with model: ${MODEL_NAME}`);
+    // Initialize the Gemini API with the recommended format
+    this.genAI = new GoogleGenerativeAI(API_KEY, {
+      httpOptions: { apiVersion: "v1" }  // Using v1 as a more stable version
+    });
+    
+    // Use the model name from documentation - update to latest model
+    this.modelName = "gemini-1.5-pro"; // Can be updated to newer models when available
+    this.model = this.genAI.getGenerativeModel({ model: this.modelName });
+    
+    console.log(`Initialized Gemini AI with model: ${this.modelName}`);
   }
 
   /**
@@ -226,7 +231,7 @@ class GeminiService {
       
       console.log(`Generating quiz for ${isSubtopic ? 'subtopic' : 'topic'}: ${unitTitle}`);
       
-      // Create a structured prompt that includes all necessary context
+      // Create a structured prompt that includes all necessary context and explicitly requests JSON
       const prompt = `
         You are an expert educational assessment creator designing a quiz for a learning platform. 
         Create a quiz based on the following content:
@@ -249,7 +254,7 @@ class GeminiService {
         6. Ensure questions range from basic recall to application of concepts
         
         --- RESPONSE FORMAT ---
-        Return a valid JSON object with the following structure:
+        Return a valid JSON object with the following structure without any markdown formatting:
         {
           "title": "Quiz: [appropriate title based on content]",
           "description": "Brief description of what the quiz covers",
@@ -270,55 +275,63 @@ class GeminiService {
           ]
         }
         
-        IMPORTANT FORMATTING NOTES:
+        IMPORTANT: 
+        - The response must be a single valid JSON object
+        - Do not include backticks, "json" keyword, or any other text before or after the JSON
         - For multiple-choice questions, specify the index of the correct option (0-based) in the "answer" field
         - For true-false questions, use a boolean value (true or false) in the "answer" field
-        - Ensure your JSON is valid with no syntax errors
-        - Do not include any text before or after the JSON
+        - Ensure all fields are present in each question object
       `;
 
-      // Generate content using the correct API format
-      console.log(`Sending quiz generation prompt to Gemini for ${unitTitle}`);
-      const result = await this.model.generateContent({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }]
-          }
-        ]
-      });
-      
-      const response = result.response;
-      const responseText = response.text();
-      
-      // Log a truncated version of the response for debugging
-      console.log(`Raw quiz generation response for ${unitTitle} (truncated):`, 
-        responseText.substring(0, 300) + '... (truncated)');
-      
-      // Extract the JSON from the response
-      let jsonString;
-      const jsonMatch = responseText.match(/```json\n([\s\S]*?)\n```/) || 
-                        responseText.match(/```\n([\s\S]*?)\n```/);
-      
-      if (jsonMatch && jsonMatch[1]) {
-        jsonString = jsonMatch[1];
-      } else {
-        // If not found in code blocks, look for JSON object pattern
-        const objectMatch = responseText.match(/{[\s\S]*}/);
-        if (objectMatch) {
-          jsonString = objectMatch[0];
-        } else {
-          console.error('JSON pattern not found in quiz response:', responseText);
-          throw new Error("Failed to parse quiz data from AI response: No JSON structure found");
-        }
-      }
-      
       try {
-        // Parse the extracted JSON
-        const quizData = JSON.parse(jsonString);
+        // Generate content using the updated API format
+        console.log(`Sending quiz generation prompt to Gemini for ${unitTitle}`);
+        const result = await this.model.generateContent({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.2, // Lower temperature for more structured output
+            maxOutputTokens: 8192,
+          }
+        });
+        
+        const response = result.response;
+        const responseText = response.text();
+        
+        // Log a truncated version of the response for debugging
+        console.log(`Quiz generation response for ${unitTitle} (truncated):`, 
+          responseText.substring(0, 200) + '... (truncated)');
+        
+        // Attempt to parse the response as JSON
+        let quizData;
+        try {
+          // First attempt: try to parse the entire response as JSON
+          quizData = JSON.parse(responseText);
+        } catch (directParseError) {
+          console.log('Direct JSON parse failed, trying to extract JSON from response');
+          
+          // Second attempt: try to extract JSON using regex patterns
+          let jsonString;
+          // Look for JSON in markdown code blocks
+          const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || 
+                            responseText.match(/({[\s\S]*})/);
+          
+          if (jsonMatch && jsonMatch[1]) {
+            jsonString = jsonMatch[1].trim();
+            console.log('Found JSON pattern in response');
+            try {
+              quizData = JSON.parse(jsonString);
+            } catch (matchParseError) {
+              console.error('Failed to parse extracted JSON:', matchParseError);
+              throw new Error('Could not parse quiz data from AI response');
+            }
+          } else {
+            console.error('No JSON structure could be extracted from the response');
+            throw new Error('AI response did not contain valid JSON data');
+          }
+        }
         
         // Validate the quiz data structure
-        if (!quizData.questions || !Array.isArray(quizData.questions)) {
+        if (!quizData || !quizData.questions || !Array.isArray(quizData.questions) || quizData.questions.length === 0) {
           console.error('Invalid quiz data structure:', quizData);
           throw new Error("Invalid quiz data structure returned by AI");
         }
@@ -346,14 +359,53 @@ class GeminiService {
         });
         
         return quizData;
-      } catch (parseError) {
-        console.error('Quiz JSON parse error:', parseError, 'JSON string:', jsonString);
-        throw new Error(`Failed to parse quiz data: ${parseError.message}`);
+      } catch (generationError) {
+        console.error('Quiz generation API error:', generationError);
+        throw new Error(`Failed to generate quiz: ${generationError.message}`);
       }
     } catch (error) {
-      console.error('Error generating quiz:', error);
-      throw error;
+      console.error('Error in quiz generation process:', error);
+      
+      // Return a basic fallback quiz structure if generation fails
+      return this.createFallbackQuiz(learningData);
     }
+  }
+  
+  /**
+   * Create a fallback quiz when AI generation fails
+   * @param {Object} learningData - Data about the learning unit
+   * @returns {Object} Basic quiz structure
+   */
+  createFallbackQuiz(learningData) {
+    const isSubtopic = learningData.subtopicIndex !== undefined && learningData.subtopicTitle;
+    const unitTitle = isSubtopic ? learningData.subtopicTitle : learningData.topicTitle;
+    
+    console.log(`Creating fallback quiz for ${unitTitle}`);
+    
+    return {
+      title: `Quiz: ${unitTitle}`,
+      description: `Test your knowledge about ${unitTitle}`,
+      questions: [
+        {
+          type: "multipleChoice",
+          question: `Which of the following best describes ${unitTitle}?`,
+          options: [
+            "A core concept in this module",
+            "An advanced topic requiring prerequisite knowledge",
+            "A supplementary concept providing context",
+            "A practical application of earlier concepts"
+          ],
+          answer: 0,
+          explanation: "This is the main focus of the current learning unit."
+        },
+        {
+          type: "trueFalse",
+          question: `${unitTitle} is an important concept to understand for mastery of this subject.`,
+          answer: true,
+          explanation: "Understanding this concept is essential for building a solid foundation in this subject area."
+        }
+      ]
+    };
   }
 
   /**

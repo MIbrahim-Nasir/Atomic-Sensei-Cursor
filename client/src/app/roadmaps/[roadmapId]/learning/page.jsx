@@ -473,17 +473,44 @@ export default function LearningPage() {
         const completionData = {
           roadmapId,
           moduleIndex,
-          topicIndex
+          topicIndex,
+          completed: true // Mark as completed
         };
         
         if (subtopicIndex !== null) {
           completionData.subtopicIndex = subtopicIndex;
         }
         
-        // In a real implementation, call API to update progress
-        // await roadmapService.updateLearningProgress(completionData);
+        console.log('Updating completion status:', completionData);
+        
+        // Call API to update progress
+        const result = await roadmapService.updateLearningProgress(completionData);
+        
+        console.log('Progress updated successfully:', result);
+        
+        // Update local roadmap state to reflect completion
+        if (roadmap) {
+          const updatedRoadmap = { ...roadmap };
+          
+          if (subtopicIndex !== null && updatedRoadmap.modules[moduleIndex].topics[topicIndex].subtopics) {
+            updatedRoadmap.modules[moduleIndex].topics[topicIndex].subtopics[subtopicIndex].completed = true;
+          } else {
+            updatedRoadmap.modules[moduleIndex].topics[topicIndex].completed = true;
+          }
+          
+          setRoadmap(updatedRoadmap);
+        }
+        
+        // Show timer setup after completion
+        if (results.score >= 60) { // Pass threshold of 60%
+          // Wait a bit before showing the timer setup to let user see results
+          setTimeout(() => {
+            setShowTimerSetup(true);
+          }, 3000);
+        }
       } catch (progressError) {
         console.error('Failed to update learning progress:', progressError);
+        setError('Your quiz was submitted, but we could not update your progress. Please try again later.');
       }
       
     } catch (err) {
@@ -724,6 +751,21 @@ Python's simplicity and readability, combined with its powerful features, have m
             <p className="mt-1 text-black">
               You've completed this learning topic. Set a timer for your next lesson?
             </p>
+            
+            {/* Add a visual completion indicator */}
+            <div className="mt-4 flex items-center p-3 bg-green-50 border border-green-200 rounded-lg">
+              <CheckCircleIcon className="h-6 w-6 text-green-600 mr-2" />
+              <div>
+                <p className="font-medium text-green-800">
+                  {subtopicIndex !== null ? 'Subtopic' : 'Topic'}: {learningUnitTitle} completed
+                </p>
+                <p className="text-sm text-green-700 mt-1">
+                  Your progress has been updated. Next topic: {
+                    roadmap.modules[nextModuleIndex]?.topics[nextTopicIndex]?.title || 'Next available topic'
+                  }
+                </p>
+              </div>
+            </div>
           </div>
           
           <div className="p-6">
@@ -849,6 +891,14 @@ Python's simplicity and readability, combined with its powerful features, have m
                    quizResults.score >= 50 ? 'Good effort! You understand the basics but might need some review.' :
                    'This topic needs more review. Consider revisiting the content.'}
                 </p>
+                
+                {/* Add completion status indicator */}
+                <div className="mt-4 p-3 rounded-lg bg-blue-50 border border-blue-200 inline-flex items-center">
+                  <CheckCircleIcon className="h-5 w-5 text-blue-600 mr-2" />
+                  <span className="text-blue-800 font-medium">
+                    {subtopicIndex !== null ? 'Subtopic' : 'Topic'} marked as completed
+                  </span>
+                </div>
               </div>
               
               <div>
@@ -904,9 +954,10 @@ Python's simplicity and readability, combined with its powerful features, have m
               <div className="mt-8 flex justify-end">
                 <button
                   onClick={() => setShowTimerSetup(true)}
-                  className="px-5 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                  className="px-5 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 flex items-center"
                 >
-                  Continue
+                  <CheckCircleIcon className="h-5 w-5 mr-2" />
+                  Continue to Next Topic
                 </button>
               </div>
             </div>

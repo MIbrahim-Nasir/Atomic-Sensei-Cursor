@@ -205,6 +205,103 @@ router.put('/:id/progress', authMiddleware, async (req, res) => {
 });
 
 /**
+ * @route   PUT /api/roadmaps/:id/progress/subtopic
+ * @desc    Update roadmap progress for subtopics
+ * @access  Private
+ */
+router.put('/:id/progress/subtopic', authMiddleware, async (req, res) => {
+  try {
+    const { moduleIndex, topicIndex, subtopicIndex, completed } = req.body;
+    
+    // Find roadmap
+    const roadmap = await Roadmap.findOne({ _id: req.params.id, user: req.user.id });
+    
+    if (!roadmap) {
+      return res.status(404).json({ message: 'Roadmap not found' });
+    }
+    
+    // Validate that the subtopic exists
+    if (!roadmap.modules[moduleIndex] || 
+        !roadmap.modules[moduleIndex].topics[topicIndex] || 
+        !roadmap.modules[moduleIndex].topics[topicIndex].subtopics || 
+        !roadmap.modules[moduleIndex].topics[topicIndex].subtopics[subtopicIndex]) {
+      return res.status(400).json({ message: 'Invalid module, topic, or subtopic index' });
+    }
+    
+    // Update subtopic completion status
+    roadmap.modules[moduleIndex].topics[topicIndex].subtopics[subtopicIndex].completed = completed;
+    
+    if (completed) {
+      roadmap.modules[moduleIndex].topics[topicIndex].subtopics[subtopicIndex].completedAt = Date.now();
+      
+      // Check if all subtopics are completed, and if so, mark the parent topic as completed
+      const allSubtopicsCompleted = roadmap.modules[moduleIndex].topics[topicIndex].subtopics.every(
+        subtopic => subtopic.completed
+      );
+      
+      if (allSubtopicsCompleted) {
+        roadmap.modules[moduleIndex].topics[topicIndex].completed = true;
+        roadmap.modules[moduleIndex].topics[topicIndex].completedAt = Date.now();
+        
+        // Check if all topics in module are completed
+        const allTopicsCompleted = roadmap.modules[moduleIndex].topics.every(topic => topic.completed);
+        roadmap.modules[moduleIndex].completed = allTopicsCompleted;
+        
+        if (allTopicsCompleted) {
+          roadmap.modules[moduleIndex].completedAt = Date.now();
+        }
+        
+        // If current topic completed, move to next topic or next module
+        let nextModuleIndex = moduleIndex;
+        let nextTopicIndex = topicIndex + 1;
+        
+        if (nextTopicIndex >= roadmap.modules[moduleIndex].topics.length) {
+          nextModuleIndex = moduleIndex + 1;
+          nextTopicIndex = 0;
+        }
+        
+        // Check if we've completed the entire roadmap
+        if (nextModuleIndex < roadmap.modules.length) {
+          roadmap.currentModule = nextModuleIndex;
+          roadmap.currentTopic = nextTopicIndex;
+        } else {
+          // Roadmap completed
+          roadmap.completedAt = Date.now();
+        }
+      }
+    } else {
+      roadmap.modules[moduleIndex].topics[topicIndex].subtopics[subtopicIndex].completedAt = null;
+      
+      // If a subtopic is marked incomplete, the parent topic should also be marked incomplete
+      roadmap.modules[moduleIndex].topics[topicIndex].completed = false;
+      roadmap.modules[moduleIndex].topics[topicIndex].completedAt = null;
+      
+      // Also mark the module as incomplete
+      roadmap.modules[moduleIndex].completed = false;
+      roadmap.modules[moduleIndex].completedAt = null;
+    }
+    
+    // Calculate overall progress
+    const totalTopics = roadmap.modules.reduce((count, module) => count + module.topics.length, 0);
+    const completedTopics = roadmap.modules.reduce((count, module) => {
+      return count + module.topics.filter(topic => topic.completed).length;
+    }, 0);
+    
+    roadmap.progress = Math.round((completedTopics / totalTopics) * 100);
+    
+    await roadmap.save();
+    
+    res.json({
+      message: 'Subtopic progress updated',
+      roadmap
+    });
+  } catch (error) {
+    console.error('Update subtopic progress error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+/**
  * @route   DELETE /api/roadmaps/:id
  * @desc    Delete a roadmap
  * @access  Private
