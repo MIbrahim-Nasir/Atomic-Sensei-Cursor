@@ -11,7 +11,7 @@ class GeminiService {
     });
     
     // Use the model name from documentation - update to latest model
-    this.modelName = "gemini-1.5-pro"; // Can be updated to newer models when available
+    this.modelName = "gemini-2.0-flash"; // Can be updated to newer models when available
     this.model = this.genAI.getGenerativeModel({ model: this.modelName });
     
     console.log(`Initialized Gemini AI with model: ${this.modelName}`);
@@ -67,8 +67,8 @@ class GeminiService {
           ]
         }
 
-        The structure should be detailed with at least 3-5 modules and each module should have 5-10 small atomic topics.
-        Each topic should have 2-4 subtopics where appropriate to break down the learning even further.
+        create a comprehensive roadmap personlized to the user's goals and preferences.
+        generate as many modules and topics as needed to achieve the user's goals.
         Very important: Your response must be a valid JSON object with exactly this structure. Do not include markdown formatting or explanation text.
       `;
 
@@ -84,7 +84,7 @@ class GeminiService {
         ]
       });
       
-      console.log('Raw API result:', JSON.stringify(result).substring(0, 200) + '... (truncated)');
+      console.log('Raw API result:', JSON.stringify(result));
       
       const response = result.response;
       const responseText = response.text();
@@ -168,7 +168,7 @@ class GeminiService {
         
         The content should be:
         1. Tailored for a ${skillLevel} skill level
-        2. Concise but comprehensive with a word count of 800-1200 words
+        2. Concise but comprehensive
         3. Include concrete examples and practical applications
         4. Incorporate analogies to aid understanding where appropriate
         5. Use a clear structure with headings and subheadings
